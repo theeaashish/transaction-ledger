@@ -1,29 +1,9 @@
 from datetime import datetime
-from decimal import Decimal
-from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, WithJsonSchema
+from pydantic import BaseModel, ConfigDict, Field
 
-
-def _serialize_money(value: Decimal) -> str:
-    """Preserve decimal precision and always include two fractional digits."""
-    return format(value, ".2f")
-
-
-Money = Annotated[
-    Decimal,
-    PlainSerializer(_serialize_money, return_type=str, when_used="json"),
-    WithJsonSchema(
-        {
-            "type": "string",
-            "pattern": r"^\d+\.\d{2}$",
-            "description": "Exact monetary amount with two fractional digits.",
-            "examples": ["0.00", "125.50"],
-        },
-        mode="serialization",
-    ),
-]
+from app.core.types import Money
 
 
 class AccountCreate(BaseModel):

@@ -20,7 +20,8 @@ ledger-api/
 │   ├── core/
 │   │   ├── config.py             # Pydantic Settings & environment variables
 │   │   ├── exceptions.py         # Standardized exception classes and handlers
-│   │   └── logging.py            # Centralized logging configuration
+│   │   ├── logging.py            # Centralized logging configuration
+│   │   └── types.py              # Shared Money serialization and type definitions
 │   ├── db/
 │   │   ├── base.py               # Base DeclarativeBase, UUIDMixin, TimestampMixin, Mixin
 │   │   ├── database.py           # Engine, SessionLocal, get_db, managed_session
@@ -31,17 +32,23 @@ ledger-api/
 │   │   ├── services.py           # Central service dependency factories
 │   │   └── controllers.py        # Central controller dependency factories
 │   ├── modules/
-│   │   └── accounts/             # Account router, controller, service, and schemas
+│   │   ├── accounts/             # Account router, controller, service, and schemas
+│   │   └── transactions/         # Transaction router, controller, service, and schemas
 │   ├── repositories/
 │   │   ├── base.py               # Generic BaseRepository[ModelT]
-│   │   └── account.py            # Account persistence using BaseRepository[Account]
+│   │   ├── account.py            # Account persistence using BaseRepository[Account]
+│   │   └── transaction.py        # Transaction persistence using BaseRepository[Transaction]
 │   └── main.py                   # FastAPI application entrypoint and lifespan manager
 ├── tests/
 │   ├── conftest.py               # SQLite and isolated PostgreSQL/TestClient fixtures
 │   ├── test_accounts.py          # Account API, validation, DI, and transaction tests
 │   ├── test_db_base.py           # Tests for UUIDv7 and Timestamp mixins & BaseRepository
 │   ├── test_exceptions.py        # Tests for error envelopes and exception handlers
-│   └── test_health.py            # Tests for health and root endpoints
+│   ├── test_health.py            # Tests for health and root endpoints
+│   ├── test_models.py            # Database model constraint and relationship tests
+│   ├── test_transaction_concurrency.py # Concurrent debit and duplicate reference tests
+│   ├── test_transactions.py      # Transaction API, validation, atomicity, and history tests
+│   └── test_trigger.py           # PostgreSQL immutability trigger tests
 ├── .env.example                  # Environment variable template
 ├── Makefile                      # Standard CLI automation tasks
 ├── pyproject.toml                # Project metadata, dependencies, Ruff & BasedPyright config
@@ -188,7 +195,124 @@ Validation errors include field details in `error.details`. Both endpoints, requ
 
 Authentication and authorization are outside the scope of this assessment.
 
-## 5. PostgreSQL Integration Tests
+---
+
+## 5. Transaction API
+
+Transaction dependencies are injected centrally via `app/dependencies/`:
+`get_db` / `DBSession` → `AccountRepository` + `TransactionRepository` → `TransactionService` → `TransactionController` → router.
+All layers share the identical request-scoped synchronous SQLAlchemy `Session`.
+
+### 5.1 Create a transaction
+
+`POST /api/v1/accounts/{account_id}/transactions` creates an immutable transaction record and updates the account balance within a single atomic database transaction.
+
+Example request body:
+
+```json
+{
+  "type": "credit",
+  "amount": "100.00",
+  "description": "Initial deposit",
+  "reference_id": "REF-2026-001"
+}
+```
+
+Successful response: **201 Created**.
+
+```json
+{
+  "id": "019aa695-6280-7000-8000-000000000010",
+  "account_id": "019aa695-6280-7000-8000-000000000001",
+  "type": "credit",
+  "amount": "100.00",
+  "description": "Initial deposit",
+  "reference_id": "REF-2026-001",
+  "balance_after": "100.00",
+  "created_at": "2026-10-28T09:15:00Z"
+}
+```
+
+#### Business Rules & Invariants
+- **Credit**: Computes `new_balance = current_balance + amount`, updates the account balance, and inserts the transaction record.
+- **Debit**: Verifies that `current_balance >= amount`. If funds are insufficient, rejects the operation with **409 Conflict** and error code `INSUFFICIENT_BALANCE`. If sufficient, computes `new_balance = current_balance - amount`.
+- **Atomicity & Row Locking**: The account row is locked exclusively using `SELECT ... FOR UPDATE` before balance evaluation and modification. The balance update and transaction insert occur in the same database transaction. If any failure occurs, all writes roll back.
+- **Resulting Balance**: The response field `balance_after` is computed and returned while holding the lock; it is never persisted as a column on the `transactions` table.
+- **Idempotency**: Submitting a duplicate `reference_id` on the same account returns **409 Conflict** with error code `DUPLICATE_TRANSACTION`. Duplicate detection is enforced both application-side and via PostgreSQL's `UNIQUE (account_id, reference_id)` constraint (`uq_account_reference_id`). The same reference ID is permitted across different accounts.
+- **Monetary Format**: Monetary amounts (`amount`, `balance_after`) are exact `Decimal` values serialized in JSON as **strings with exactly two fractional digits** (e.g. `"100.00"`, `"0.00"`). Amounts exceeding two decimal places (e.g. `"100.001"`) are rejected with **422 Unprocessable Entity**.
+
+### 5.2 Retrieve transaction history
+
+`GET /api/v1/accounts/{account_id}/transactions` retrieves paginated transactions for an existing account, sorted newest first.
+
+Query parameters:
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `type` | string | `None` | Optional filter: `credit` or `debit` |
+| `page` | integer | `1` | 1-based page number (minimum 1) |
+| `limit` | integer | `10` | Maximum items per page (1 to 100) |
+
+Example:
+
+`GET /api/v1/accounts/{account_id}/transactions?type=credit&page=1&limit=10`
+
+Successful response: **200 OK**.
+
+```json
+{
+  "account_id": "019aa695-6280-7000-8000-000000000001",
+  "current_page": 1,
+  "page_size": 10,
+  "total_records": 1,
+  "total_pages": 1,
+  "transactions": [
+    {
+      "id": "019aa695-6280-7000-8000-000000000010",
+      "account_id": "019aa695-6280-7000-8000-000000000001",
+      "type": "credit",
+      "amount": "100.00",
+      "description": "Initial deposit",
+      "reference_id": "REF-2026-001",
+      "created_at": "2026-10-28T09:15:00Z"
+    }
+  ]
+}
+```
+
+#### History Characteristics
+- **Account Verification**: Verifies the account exists before querying history; returns **404** with `ACCOUNT_NOT_FOUND` if absent. History queries are read-only and do not acquire row locks.
+- **Deterministic Ordering**: Ordered deterministically by `created_at DESC, id DESC`, utilizing the existing `ix_transactions_account_history` index.
+- **Pagination**: `total_pages` is computed as `ceil(total_records / limit)` (or `0` when `total_records == 0`). Valid pages requested beyond `total_pages` return `transactions: []` with accurate pagination metadata.
+- **Filter Consistency**: Identical filters are applied to both count and records queries.
+
+### 5.3 Error Envelopes & Status Codes
+
+All errors use the standardized JSON envelope:
+
+```json
+{
+  "error": {
+    "code": "DUPLICATE_TRANSACTION",
+    "message": "Duplicate transaction reference.",
+    "details": null
+  }
+}
+```
+
+| HTTP Status | Error Code | Trigger Condition |
+|---|---|---|
+| `201 Created` | — | Transaction created and committed |
+| `200 OK` | — | Transaction history successfully retrieved |
+| `404 Not Found` | `ACCOUNT_NOT_FOUND` | Account does not exist |
+| `409 Conflict` | `DUPLICATE_TRANSACTION` | `reference_id` already exists for this account |
+| `409 Conflict` | `INSUFFICIENT_BALANCE` | Debit amount exceeds account balance |
+| `422 Unprocessable Entity` | `VALIDATION_ERROR` | Invalid type, zero/negative amount, >2 decimal places, missing/blank fields, unknown fields, invalid UUID, or invalid page/limit |
+| `500 Internal Server Error` | `INTERNAL_SERVER_ERROR` | Unexpected database or runtime failure (safe envelope, details suppressed) |
+
+---
+
+## 6. PostgreSQL Integration Tests
 
 Use a dedicated test database with the existing Alembic migration applied. Set `TEST_DATABASE_URL` explicitly; PostgreSQL tests are skipped when it is unset, and never fall back to the application's `DATABASE_URL`.
 
@@ -203,4 +327,4 @@ DATABASE_URL="$TEST_DATABASE_URL" uv run alembic upgrade head
 make test
 ```
 
-PostgreSQL fixtures open an outer transaction and use SQLAlchemy's `join_transaction_mode="create_savepoint"` so service commits and rollbacks remain contained. Teardown rolls back the outer transaction. These fixtures do not create or drop tables. Account persistence, timezone-aware timestamps, exact decimal balances, and database failure recovery are checked against PostgreSQL; request validation and existing framework tests also retain the in-memory SQLite setup.
+PostgreSQL fixtures open an outer transaction and use SQLAlchemy's `join_transaction_mode="create_savepoint"` so service commits and rollbacks remain contained. Teardown rolls back the outer transaction. Concurrency tests run across isolated PostgreSQL sessions using `pg_engine` and barrier synchronization to verify row-level locking (`SELECT ... FOR UPDATE`), overdraft prevention, and unique constraint idempotency under real concurrent load.

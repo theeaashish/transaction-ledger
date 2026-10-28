@@ -320,7 +320,9 @@ def test_account_openapi_contract(client: TestClient) -> None:
     assert response.status_code == 200
     document = response.json()
     paths = document["paths"]
-    assert {path for path in paths if "/accounts" in path} == {
+    assert {
+        path for path in paths if "/accounts" in path and "transactions" not in path
+    } == {
         ACCOUNTS_URL,
         f"{ACCOUNTS_URL}/{{account_id}}/balance",
     }
