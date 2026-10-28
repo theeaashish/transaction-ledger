@@ -9,6 +9,7 @@ from app.dependencies.repositories import (
 )
 from app.modules.accounts.service import AccountService
 from app.modules.transactions.service import TransactionService
+from app.modules.transfers.service import TransferService
 
 
 def get_account_service(
@@ -31,3 +32,15 @@ def get_transaction_service(
 
 
 TransactionServiceDep = Annotated[TransactionService, Depends(get_transaction_service)]
+
+
+def get_transfer_service(
+    account_repository: AccountRepositoryDep,
+    transaction_repository: TransactionRepositoryDep,
+    db: DBSession,
+) -> TransferService:
+    """Provide a transfer service sharing its repositories' request session."""
+    return TransferService(account_repository, transaction_repository, db)
+
+
+TransferServiceDep = Annotated[TransferService, Depends(get_transfer_service)]

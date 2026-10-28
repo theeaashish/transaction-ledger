@@ -13,25 +13,11 @@ from app.core.exceptions import (
     InsufficientBalanceException,
     ValidationException,
 )
+from app.db.errors import is_duplicate_reference_error
 from app.db.models.transaction import Transaction
 from app.modules.transactions.schemas import TransactionCreate, TransactionType
 from app.repositories.account import AccountRepository
 from app.repositories.transaction import TransactionRepository
-
-
-def _is_duplicate_reference_error(exc: IntegrityError) -> bool:
-    """Identify a duplicate account-scoped transaction reference."""
-    diag = getattr(exc.orig, "diag", None)
-
-    if getattr(diag, "constraint_name", None) == "uq_account_reference_id":
-        return True
-
-    # Fallback for SQLite-based tests.
-    message = str(exc.orig or exc)
-    return (
-        "uq_account_reference_id" in message
-        or "transactions.account_id, transactions.reference_id" in message
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +93,7 @@ class TransactionService:
         except IntegrityError as exc:
             self.db.rollback()
 
-            if _is_duplicate_reference_error(exc):
+            if is_duplicate_reference_error(exc):
                 raise DuplicateTransactionException() from exc
 
             raise

@@ -25,6 +25,7 @@ ledger-api/
 │   ├── db/
 │   │   ├── base.py               # Base DeclarativeBase, UUIDMixin, TimestampMixin, Mixin
 │   │   ├── database.py           # Engine, SessionLocal, get_db, managed_session
+│   │   ├── errors.py             # Database error inspection and constraint helpers
 │   │   └── models/               # SQLAlchemy model definitions (for Alembic discovery)
 │   ├── dependencies/
 │   │   ├── db.py                 # Request-scoped synchronous DBSession
@@ -33,7 +34,8 @@ ledger-api/
 │   │   └── controllers.py        # Central controller dependency factories
 │   ├── modules/
 │   │   ├── accounts/             # Account router, controller, service, and schemas
-│   │   └── transactions/         # Transaction router, controller, service, and schemas
+│   │   ├── transactions/         # Transaction router, controller, service, and schemas
+│   │   └── transfers/            # Money transfer router, controller, service, and schemas
 │   ├── repositories/
 │   │   ├── base.py               # Generic BaseRepository[ModelT]
 │   │   ├── account.py            # Account persistence using BaseRepository[Account]
@@ -48,6 +50,8 @@ ledger-api/
 │   ├── test_models.py            # Database model constraint and relationship tests
 │   ├── test_transaction_concurrency.py # Concurrent debit and duplicate reference tests
 │   ├── test_transactions.py      # Transaction API, validation, atomicity, and history tests
+│   ├── test_transfer_concurrency.py    # Deadlock prevention, duplicate transfer, overdraft tests
+│   ├── test_transfers.py         # Money transfer API, validation, atomicity, and DI tests
 │   └── test_trigger.py           # PostgreSQL immutability trigger tests
 ├── .env.example                  # Environment variable template
 ├── Makefile                      # Standard CLI automation tasks
@@ -312,7 +316,74 @@ All errors use the standardized JSON envelope:
 
 ---
 
-## 6. PostgreSQL Integration Tests
+## 6. Money Transfer API
+
+Transfer dependencies are wired centrally in `app/dependencies/`:
+`get_db` / `DBSession` → `AccountRepository` + `TransactionRepository` → `TransferService` → `TransferController` → router.
+All layers share the identical request-scoped synchronous SQLAlchemy `Session`.
+
+### 6.1 Create a transfer
+
+`POST /api/v1/transfers` atomically transfers funds between two distinct accounts using double-entry bookkeeping (a debit record on the source account and a credit record on the destination account).
+
+Example request body:
+
+```json
+{
+  "source_account_id": "019aa695-6280-7000-8000-000000000001",
+  "destination_account_id": "019aa695-6280-7000-8000-000000000002",
+  "amount": "50.00",
+  "description": "Invoice payment",
+  "reference_id": "TRF-2026-001"
+}
+```
+
+Successful response: **201 Created**.
+
+```json
+{
+  "reference_id": "TRF-2026-001",
+  "amount": "50.00",
+  "source_account": {
+    "account_id": "019aa695-6280-7000-8000-000000000001",
+    "balance": "50.00"
+  },
+  "destination_account": {
+    "account_id": "019aa695-6280-7000-8000-000000000002",
+    "balance": "100.00"
+  },
+  "debit_transaction_id": "019aa695-6280-7000-8000-000000000021",
+  "credit_transaction_id": "019aa695-6280-7000-8000-000000000022",
+  "created_at": "2026-10-28T09:30:00Z"
+}
+```
+
+#### Transfer Business Rules & Invariants
+- **Double-Entry Ledger Creation**: Creates exactly two entries in the existing `transactions` table:
+  1. A `debit` entry on the source account with the specified `amount`, `reference_id`, and `description`.
+  2. A `credit` entry on the destination account with the identical `amount`, `reference_id`, and `description`.
+- **Atomicity**: Both account balance updates and both ledger transaction inserts are committed together in a single database transaction. If any error occurs (insufficient funds, constraint violation, connection disruption), all mutations roll back completely.
+- **Deadlock Prevention via Deterministic Lock Ordering**: Both participating accounts are locked using `SELECT ... FOR UPDATE` via `AccountRepository.get_by_id_for_update()`. To prevent deadlocks when concurrent transfers occur in opposite directions (e.g. Account A → Account B and Account B → Account A simultaneously), lock acquisition is strictly sorted by account UUID (`sorted([source_id, dest_id])`).
+- **Idempotency**: Submitting a transfer with a `reference_id` that already exists on either the source or destination account returns **409 Conflict** with error code `DUPLICATE_TRANSACTION`. Duplicate detection checks application-level records and safely traps PostgreSQL's `uq_account_reference_id` unique constraint. The same reference ID remains valid across unrelated account pairs.
+- **Overdraft Prevention**: Checks that `source_account.balance >= amount`. If insufficient, returns **409 Conflict** with error code `INSUFFICIENT_BALANCE`. Balances are guaranteed never to go negative.
+- **Self-Transfer Prevention**: Self-transfers (`source_account_id == destination_account_id`) are rejected at the schema level with **422 Unprocessable Entity** (`VALIDATION_ERROR`).
+- **Exact Decimal Arithmetic**: Balances and amounts use exact Python `Decimal` arithmetic and are formatted as strings with exactly 2 decimal places (`Money` type). Excessive decimal precision (e.g. `10.000` or `10.005`) is strictly rejected.
+- **Immutability**: Both generated transactions are protected by PostgreSQL's immutability trigger (`trg_prevent_transaction_modification`), preventing updates and deletes.
+
+### 6.2 Transfer Error Responses & Status Codes
+
+| HTTP Status | Error Code | Trigger Condition |
+|---|---|---|
+| `201 Created` | — | Transfer executed and atomically committed |
+| `404 Not Found` | `ACCOUNT_NOT_FOUND` | Source or destination account does not exist |
+| `409 Conflict` | `DUPLICATE_TRANSACTION` | `reference_id` already exists for source or destination account |
+| `409 Conflict` | `INSUFFICIENT_BALANCE` | Transfer amount exceeds source account balance |
+| `422 Unprocessable Entity` | `VALIDATION_ERROR` | Self-transfer, zero/negative amount, >2 decimal places, missing/blank fields, or extra unknown fields |
+| `500 Internal Server Error` | `INTERNAL_SERVER_ERROR` | Unexpected database or system error (database details suppressed) |
+
+---
+
+## 7. PostgreSQL Integration & Concurrency Tests
 
 Use a dedicated test database with the existing Alembic migration applied. Set `TEST_DATABASE_URL` explicitly; PostgreSQL tests are skipped when it is unset, and never fall back to the application's `DATABASE_URL`.
 
@@ -327,4 +398,10 @@ DATABASE_URL="$TEST_DATABASE_URL" uv run alembic upgrade head
 make test
 ```
 
-PostgreSQL fixtures open an outer transaction and use SQLAlchemy's `join_transaction_mode="create_savepoint"` so service commits and rollbacks remain contained. Teardown rolls back the outer transaction. Concurrency tests run across isolated PostgreSQL sessions using `pg_engine` and barrier synchronization to verify row-level locking (`SELECT ... FOR UPDATE`), overdraft prevention, and unique constraint idempotency under real concurrent load.
+PostgreSQL fixtures open an outer transaction and use SQLAlchemy's `join_transaction_mode="create_savepoint"` so service commits and rollbacks remain contained. Teardown rolls back the outer transaction.
+
+### Concurrency Test Scenarios
+1. **Opposite-Direction Transfers (Deadlock Prevention)**: Simultaneous transfers between Account A and Account B in opposite directions (`A -> B` and `B -> A`) executed concurrently with barrier synchronization. Verified to avoid deadlocks due to deterministic UUID-ordered row locking, with complete conservation of total funds.
+2. **Concurrent Duplicate Transfers (Idempotency Race)**: Identical transfer requests submitted in parallel across separate threads. Verified that exactly one transfer succeeds and the duplicate request is rejected with `409 DUPLICATE_TRANSACTION`.
+3. **Concurrent Overdraft Race (Balance Exhaustion)**: Competing concurrent transfers from the same source account exceeding its total balance. Verified that exactly one debit succeeds, the competing transfer receives `409 INSUFFICIENT_BALANCE`, and the balance never becomes negative.
+4. **Immutability Enforcement**: Direct `UPDATE` and `DELETE` queries on ledger transactions are verified to fail against PostgreSQL trigger `trg_prevent_transaction_modification`.
