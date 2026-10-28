@@ -1,6 +1,7 @@
-"""SQLAlchemy models package.
+from app.db.models.account import Account
+from app.db.models.transaction import Transaction
 
-Import and register models here so Alembic detects them during autogenerate migrations.
-"""
-
-__all__: list[str] = []
+__all__ = [
+    "Account",
+    "Transaction",
+]
