@@ -1,11 +1,10 @@
 from datetime import datetime
-from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.types import Money
+from app.core.types import Money, PositiveMoney
 
 TransactionType = Literal["credit", "debit"]
 
@@ -19,13 +18,7 @@ class TransactionCreate(BaseModel):
         description="Transaction type ('credit' to deposit, 'debit' to withdraw).",
         examples=["credit"],
     )
-    amount: Decimal = Field(
-        gt=Decimal("0"),
-        max_digits=18,
-        decimal_places=2,
-        description="Exact positive monetary amount with at most two decimal places.",
-        examples=["100.00"],
-    )
+    amount: PositiveMoney
     description: str = Field(
         min_length=1,
         max_length=500,
@@ -41,15 +34,6 @@ class TransactionCreate(BaseModel):
         ),
         examples=["REF-2026-001"],
     )
-
-    @field_validator("amount")
-    @classmethod
-    def validate_amount_precision(cls, v: Decimal) -> Decimal:
-        """Reject values specifying more than two fractional digits."""
-        exp = v.as_tuple().exponent
-        if isinstance(exp, int) and exp < -2:
-            raise ValueError("Monetary precision must not exceed two decimal places.")
-        return v
 
 
 class TransactionCreateResponse(BaseModel):

@@ -1,11 +1,10 @@
 from datetime import datetime
-from decimal import Decimal
 from typing import Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.core.types import Money
+from app.core.types import Money, PositiveMoney
 
 
 class TransferCreate(BaseModel):
@@ -19,13 +18,7 @@ class TransferCreate(BaseModel):
     destination_account_id: UUID = Field(
         description="UUID of the account to be credited (must differ from source).",
     )
-    amount: Decimal = Field(
-        gt=Decimal("0"),
-        max_digits=18,
-        decimal_places=2,
-        description="Positive monetary amount to transfer (at most 2 decimal places).",
-        examples=["30.00"],
-    )
+    amount: PositiveMoney
     reference_id: str = Field(
         min_length=1,
         max_length=255,
@@ -40,15 +33,6 @@ class TransferCreate(BaseModel):
         description="Transfer description (1 to 500 characters, non-blank).",
         examples=["Payment to another account"],
     )
-
-    @field_validator("amount")
-    @classmethod
-    def validate_amount_precision(cls, v: Decimal) -> Decimal:
-        """Reject values specifying more than two fractional digits."""
-        exp = v.as_tuple().exponent
-        if isinstance(exp, int) and exp < -2:
-            raise ValueError("Monetary precision must not exceed two decimal places.")
-        return v
 
     @model_validator(mode="after")
     def validate_different_accounts(self) -> Self:
