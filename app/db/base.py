@@ -31,14 +31,18 @@ class UUIDMixin:
     )
 
 
-class TimestampMixin:
-    """Adds created_at and updated_at timestamps to a model."""
+class CreatedAtMixin:
+    """Adds created_at timestamp to a model."""
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
     )
+
+
+class UpdatedAtMixin:
+    """Adds updated_at timestamp to a model."""
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -48,5 +52,9 @@ class TimestampMixin:
     )
 
 
-class Mixin(UUIDMixin, TimestampMixin):
-    """Convenience composite mixin providing both UUIDv7 primary key and timestamps."""
+class TimestampMixin(CreatedAtMixin, UpdatedAtMixin):
+    """Adds both created_at and updated_at timestamps to a model."""
+
+
+class Mixin(UUIDMixin, CreatedAtMixin):
+    """Convenience composite mixin providing UUIDv7 id and created_at timestamp."""

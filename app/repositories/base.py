@@ -29,11 +29,6 @@ class BaseRepository[ModelT: Base]:
         self.db.flush()
         return instance
 
-    def delete(self, instance: ModelT) -> None:
-        """Delete an instance from the session and flush."""
-        self.db.delete(instance)
-        self.db.flush()
-
     def count(self) -> int:
         """Count total instances of the model."""
         statement = select(func.count()).select_from(self.model)

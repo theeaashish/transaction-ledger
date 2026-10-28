@@ -5,6 +5,7 @@ from http import HTTPStatus
 from typing import Any
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -221,13 +222,15 @@ async def app_exception_handler(request: Request, exc: Exception) -> JSONRespons
 
     return JSONResponse(
         status_code=exc.status_code,
-        content={
-            "error": {
-                "code": exc.code,
-                "message": exc.message,
-                "details": exc.details,
-            },
-        },
+        content=jsonable_encoder(
+            {
+                "error": {
+                    "code": exc.code,
+                    "message": exc.message,
+                    "details": exc.details,
+                },
+            }
+        ),
     )
 
 
@@ -244,13 +247,15 @@ async def validation_exception_handler(
     )
     return JSONResponse(
         status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
-        content={
-            "error": {
-                "code": "VALIDATION_ERROR",
-                "message": "Request validation failed",
-                "details": exc.errors(),
-            },
-        },
+        content=jsonable_encoder(
+            {
+                "error": {
+                    "code": "VALIDATION_ERROR",
+                    "message": "Request validation failed",
+                    "details": exc.errors(),
+                },
+            }
+        ),
     )
 
 
@@ -271,13 +276,15 @@ async def starlette_http_exception_handler(
 
     return JSONResponse(
         status_code=exc.status_code,
-        content={
-            "error": {
-                "code": code,
-                "message": str(exc.detail),
-                "details": None,
-            },
-        },
+        content=jsonable_encoder(
+            {
+                "error": {
+                    "code": code,
+                    "message": str(exc.detail),
+                    "details": None,
+                },
+            }
+        ),
     )
 
 
@@ -290,13 +297,15 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     )
     return JSONResponse(
         status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-        content={
-            "error": {
-                "code": "INTERNAL_SERVER_ERROR",
-                "message": "Internal server error",
-                "details": None,
-            },
-        },
+        content=jsonable_encoder(
+            {
+                "error": {
+                    "code": "INTERNAL_SERVER_ERROR",
+                    "message": "Internal server error",
+                    "details": None,
+                },
+            }
+        ),
     )
 
 

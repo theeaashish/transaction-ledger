@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     # Application
     app_name: str = Field(default="Ledger API")
     app_env: Environment = Field(default=Environment.DEVELOPMENT)
-    app_debug: bool = Field(default=True)
+    app_debug: bool = Field(default=False)
     app_host: str = Field(default="127.0.0.1")
     app_port: int = Field(default=8000)
 

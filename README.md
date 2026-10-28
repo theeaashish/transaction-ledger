@@ -48,8 +48,10 @@ ledger-api/
 ### 2.1 Database Mixins & Base (`app/db/base.py`)
 - **`Base`**: Uses standard naming conventions for primary keys, foreign keys, unique constraints, check constraints, and indexes.
 - **`UUIDMixin`**: Automatically assigns primary keys using Python 3.14's native `uuid.uuid7()` (time-ordered, index-friendly UUIDv7).
-- **`TimestampMixin`**: Provides timezone-aware `created_at` and `updated_at` timestamps using database-level `func.now()`.
-- **`Mixin`**: Composite mixin combining `UUIDMixin` and `TimestampMixin`.
+- **`CreatedAtMixin`**: Provides a timezone-aware `created_at` timestamp with database-level default (`func.now()`). Designed for immutable ledger records.
+- **`UpdatedAtMixin`**: Provides a timezone-aware `updated_at` timestamp with `onupdate=func.now()`.
+- **`TimestampMixin`**: Composite mixin combining `CreatedAtMixin` and `UpdatedAtMixin`.
+- **`Mixin`**: Composite convenience mixin combining `UUIDMixin` and `CreatedAtMixin` for ledger models.
 
 ### 2.2 Database Engine & Session Management (`app/db/database.py`)
 - **`engine`**: SQLAlchemy synchronous engine with connection pre-ping.
@@ -81,6 +83,9 @@ Pre-configured exceptions:
 ### 2.4 Configuration & Logging (`app/core/config.py` & `app/core/logging.py`)
 - Environment-driven configuration via `pydantic-settings` (`Settings`, `get_settings()`).
 - Unified structured log formatting across application, Uvicorn, and SQLAlchemy.
+
+### 2.5 Generic Base Repository (`app/repositories/base.py`)
+- **`BaseRepository[ModelT]`**: Generic persistence helper providing `get_by_id`, `get_all`, `add`, and `count`. Generic deletion is deliberately omitted to safeguard against accidental financial record deletion.
 
 ---
 
