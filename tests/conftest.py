@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from collections.abc import Iterator
 
@@ -8,7 +9,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 import app.db.models  # noqa: F401
-from app.core.config import settings
 from app.db.base import Base
 from app.db.database import get_db
 from app.main import app
@@ -48,15 +48,53 @@ def db_session(db_engine: Engine) -> Iterator[Session]:
         yield session
 
 
+@pytest.fixture(scope="session")
+def pg_engine() -> Iterator[Engine]:
+    """Use an explicitly configured, migrated PostgreSQL test database."""
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("Set TEST_DATABASE_URL to a dedicated PostgreSQL test database")
+
+    engine = create_engine(database_url, pool_pre_ping=True)
+    if engine.dialect.name != "postgresql":
+        engine.dispose()
+        pytest.fail("TEST_DATABASE_URL must use PostgreSQL")
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
 @pytest.fixture
-def pg_session() -> Iterator[Session]:
-    """Provide an isolated session against PostgreSQL that always rolls back."""
-    engine = create_engine(settings.database_url)
-    with Session(engine, autoflush=False, expire_on_commit=False) as session:
+def pg_session(pg_engine: Engine) -> Iterator[Session]:
+    """Contain service commits in savepoints and always roll back test data."""
+    with pg_engine.connect() as connection:
+        transaction = connection.begin()
         try:
-            yield session
+            with Session(
+                bind=connection,
+                autoflush=False,
+                expire_on_commit=False,
+                join_transaction_mode="create_savepoint",
+            ) as session:
+                yield session
         finally:
-            session.rollback()
+            transaction.rollback()
+
+
+@pytest.fixture
+def pg_client(
+    pg_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[TestClient]:
+    """Exercise the real dependency chain against isolated PostgreSQL data."""
+
+    def override_db() -> Iterator[Session]:
+        yield pg_session
+
+    monkeypatch.setattr(app, "debug", False)
+    monkeypatch.setitem(app.dependency_overrides, get_db, override_db)
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        yield test_client
 
 
 @pytest.fixture

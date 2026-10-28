@@ -14,7 +14,7 @@ ledger-api/
 │   └── versions/                 # Individual migration revisions
 ├── app/
 │   ├── api/
-│   │   ├── router.py             # Root API router (mounts /api/v1)
+│   │   ├── router.py             # API router aggregation (prefix applied in main.py)
 │   │   └── v1/
 │   │       └── health.py         # Service liveness check (/api/v1/health)
 │   ├── core/
@@ -26,12 +26,19 @@ ledger-api/
 │   │   ├── database.py           # Engine, SessionLocal, get_db, managed_session
 │   │   └── models/               # SQLAlchemy model definitions (for Alembic discovery)
 │   ├── dependencies/
-│   │   └── db.py                 # FastAPI dependency injection helpers (DBSession)
+│   │   ├── db.py                 # Request-scoped synchronous DBSession
+│   │   ├── repositories.py       # Central repository dependency factories
+│   │   ├── services.py           # Central service dependency factories
+│   │   └── controllers.py        # Central controller dependency factories
+│   ├── modules/
+│   │   └── accounts/             # Account router, controller, service, and schemas
 │   ├── repositories/
-│   │   └── base.py               # Generic BaseRepository[ModelT]
+│   │   ├── base.py               # Generic BaseRepository[ModelT]
+│   │   └── account.py            # Account persistence using BaseRepository[Account]
 │   └── main.py                   # FastAPI application entrypoint and lifespan manager
 ├── tests/
-│   ├── conftest.py               # In-memory SQLite engine and TestClient fixtures
+│   ├── conftest.py               # SQLite and isolated PostgreSQL/TestClient fixtures
+│   ├── test_accounts.py          # Account API, validation, DI, and transaction tests
 │   ├── test_db_base.py           # Tests for UUIDv7 and Timestamp mixins & BaseRepository
 │   ├── test_exceptions.py        # Tests for error envelopes and exception handlers
 │   └── test_health.py            # Tests for health and root endpoints
@@ -118,3 +125,82 @@ make makemigrations m="migration description"
 make migrate
 make downgrade
 ```
+
+---
+
+## 4. Account API
+
+Account dependencies are constructed centrally in `app/dependencies/`:
+`get_db` / `DBSession` → `AccountRepository` → `AccountService` → `AccountController` → route.
+The repository and service share the same request-scoped synchronous session. The repository flushes pending writes; the service commits account creation and rolls back on failure.
+
+### Create an account
+
+`POST /api/v1/accounts` accepts only the account holder's name:
+
+```json
+{
+  "name": "Aashish"
+}
+```
+
+Successful response: **201 Created**.
+
+```json
+{
+  "id": "019aa695-6280-7000-8000-000000000001",
+  "name": "Aashish",
+  "balance": "0.00",
+  "created_at": "2026-10-28T09:00:00Z"
+}
+```
+
+The ID and timestamp are illustrative. The existing model mixin generates UUIDv7 identifiers, PostgreSQL generates the timezone-aware `created_at`, and every new account starts with a zero balance. Names are trimmed, required, non-blank, and limited to 255 characters. Duplicate account names are allowed. Unknown request fields, including `balance`, `id`, and `created_at`, are rejected.
+
+### Retrieve an account balance
+
+`GET /api/v1/accounts/{account_id}/balance` accepts a UUID path parameter.
+
+Successful response: **200 OK**.
+
+```json
+{
+  "account_id": "019aa695-6280-7000-8000-000000000001",
+  "balance": "0.00"
+}
+```
+
+Balances use Python `Decimal` and PostgreSQL `NUMERIC(18, 2)`. JSON always represents money as a **string with exactly two fractional digits**, such as `"0.00"` or `"125.50"`; no conversion to floating point is performed.
+
+Invalid creation requests and malformed UUIDs return **422** with code `VALIDATION_ERROR`. An absent account returns **404** with code `ACCOUNT_NOT_FOUND`. Unexpected failures return **500** with code `INTERNAL_SERVER_ERROR` and omit database details. All errors use the existing envelope:
+
+```json
+{
+  "error": {
+    "code": "ACCOUNT_NOT_FOUND",
+    "message": "Account not found",
+    "details": null
+  }
+}
+```
+
+Validation errors include field details in `error.details`. Both endpoints, request validation, response schemas, monetary string formats, and status codes are documented in FastAPI's `/docs` and `/openapi.json`.
+
+Authentication and authorization are outside the scope of this assessment.
+
+## 5. PostgreSQL Integration Tests
+
+Use a dedicated test database with the existing Alembic migration applied. Set `TEST_DATABASE_URL` explicitly; PostgreSQL tests are skipped when it is unset, and never fall back to the application's `DATABASE_URL`.
+
+```bash
+# Create a dedicated ledger_test database before running these commands.
+export TEST_DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5432/ledger_test"
+
+# Apply the existing migration only to that test database.
+DATABASE_URL="$TEST_DATABASE_URL" uv run alembic upgrade head
+
+# Run SQLite tests and PostgreSQL integration tests.
+make test
+```
+
+PostgreSQL fixtures open an outer transaction and use SQLAlchemy's `join_transaction_mode="create_savepoint"` so service commits and rollbacks remain contained. Teardown rolls back the outer transaction. These fixtures do not create or drop tables. Account persistence, timezone-aware timestamps, exact decimal balances, and database failure recovery are checked against PostgreSQL; request validation and existing framework tests also retain the in-memory SQLite setup.
